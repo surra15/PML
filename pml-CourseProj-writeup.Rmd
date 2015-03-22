@@ -1,0 +1,214 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Surra"
+date: "March 21, 2015"
+output: html_document
+---
+
+Executive Summary
+-------------------------------------------------------------------
+Given both training and test data from the following study:
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+the goal of this project is to “predict the manner in which the participants did the exercise.”
+
+THe observation is that Random Forests is a good algorithm to predict how (well) the participants did the exercise.
+
+Approach
+------------------------------------
+We will take the following approach introduced in the class. Components of a Predictor defines six stages.
+* Question
+* Input Data
+* Features
+* Algorithm
+* Parameters
+* Evaluation
+
+For the execise, load the following packages
+
+```{r, echo=FALSE}
+library(AppliedPredictiveModeling)
+library(caret)
+library(rattle)
+library(rpart.plot)
+library(randomForest)
+```
+
+Question
+------------------------------------
+In the study, six subjects participated in a dumbell lifting exercise five different ways. The five ways as described in the study, were “exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.”
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. 
+
+The question is to see if the *appropriate activity quality (class A-E) can be predicted?*
+
+Input Data
+-------------------------------------
+
+We will import the data and verify that the training data and test data are identical.
+
+```{r}
+# Download data.
+url_training <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+file_training <- "pml-training.csv"
+# download.file(url=url_training, destfile=file_training, method="curl")
+url_testing <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+file_testing <- "pml-testing.csv"
+# download.file(url=url_testing, destfile=file_testing, method="curl")
+
+# Import the data treating empty values as NA.
+df_training <- read.csv(file_training, na.strings=c("NA",""), header=TRUE)
+colnames_train <- colnames(df_training)
+df_testing <- read.csv(file_testing, na.strings=c("NA",""), header=TRUE)
+colnames_test <- colnames(df_testing)
+
+# Verify that the column names are identical in the training and test set.
+# note that classe and problem_id are different in train and test data sets
+all.equal(colnames_train[1:length(colnames_train)-1], colnames_test[1:length(colnames_train)-1])
+```
+
+Features
+-------------------------------
+Before we figure out the features, it is good to clean the data as:
+1. Remove any columns with predominantly NAs
+2. Since we are looking at sensor metric data, we can safely drop first 7 columns which are unnecessary for our prediction of interest
+3. Apply Level 1: from Raw Data to Covariate -- since we have sensor metric data we dont need to perform this step
+4. Apply Level 2: Transform tidy covariates after checkign for any variability
+
+```{r}
+# Count the number of non-NAs in each col.
+nonNAs <- function(x) {
+    as.vector(apply(x, 2, function(x) length(which(!is.na(x)))))
+}
+
+# Build vector of NA columns to drop
+colcnts <- nonNAs(df_training)
+dropCols <- c()
+for (cnt in 1:length(colcnts)) {
+    if (colcnts[cnt] < nrow(df_training)) {
+        dropCols <- c(dropCols, colnames_train[cnt])
+    }
+}
+
+# Drop NA data and the first 7 columns.
+df_training <- df_training[,!(names(df_training) %in% dropCols)]
+df_training <- df_training[,8:length(colnames(df_training))]
+
+# Since test data set is the same, do the same on test data
+df_testing <- df_testing[,!(names(df_testing) %in% dropCols)]
+df_testing <- df_testing[,8:length(colnames(df_testing))]
+
+# Show remaining columns.
+# colnames(df_training)
+# colnames(df_testing)
+```
+
+On to step 4 for applying Level 2 (tidy data to covariates) if necessary. Apply nearZeroVar to check if there is any variability. We can see from below that there is no variability (all near zerio variance variables are FALSE) so nothing to be done at this step.
+
+```{r}
+nsv <- nearZeroVar(df_training, saveMetrics=TRUE)
+nsv
+```
+
+Algorithm
+------------------------------------
+Since we have ample samples of the training data set, we will create a training subset and a validation subset from it in a 60/40 split.
+
+```{r}
+set.seed(345)
+index_subset <- createDataPartition(y=df_training$classe, p=0.75, list=FALSE)
+df_ss_train <- df_training[index_subset,]
+df_ss_valid <- df_training[-index_subset,]
+```
+
+Based on the paper published on this study and course lectures/discussions, we are going to try two different algorithms via caret package: classification tree (method=rpart) and random forests.
+
+Parameters
+-------------------------------
+The variable “classe” contains 5 levels: A, B, C, D and E. A plot of the outcome variable will allow us to see the frequency of each levels in the subTraining data set and compare one another.
+```{r}
+plot(df_ss_train$classe, col="blue", main="Bar Chart of classe variable of train subset", xlab="classe levels", ylab="Frequency")
+```
+Each level frequency is in about the same order of magnitude.
+
+Evaluation
+-------------------------------
+**Classification Tree**
+
+Let us apply classification tree on the training subset.
+```{r}
+set.seed(345)
+modFit <- train(df_ss_train$classe ~ ., data = df_ss_train, method="rpart")
+print(modFit, digits=3)
+```
+```{r}
+fancyRpartPlot(modFit$finalModel)
+```
+
+Run predictions against validation subset
+```{r}
+# run predictions against validation subset
+predicts <- predict(modFit, newdata=df_ss_valid)
+print(confusionMatrix(predicts, df_ss_valid$classe), digits=4)
+```
+
+That shows a very low accuracy of 0.4949. let us see if this improves with pre-processing and cross validation.
+```{r}
+set.seed(345)
+modFit <- train(df_ss_train$classe ~ .,  preProcess=c("center", "scale"), trControl=trainControl(method = "cv", number = 4), data = df_ss_train, method="rpart")
+print(modFit, digits=3)
+```
+
+Run predictions against the validation subset
+```{r}
+predicts <- predict(modFit, newdata=df_ss_valid)
+print(confusionMatrix(predicts, df_ss_valid$classe), digits=4)
+```
+That did not change the accuracy -- so abandoning this algorithm and trying out Random Forests
+
+**Random Forests**
+Let us check the accuracy of prediction for a standard rf method.
+
+**NOTE:** The computer is hanging with the large training data set, so running the random forest algorithms on a much smaller data set.
+```{r}
+index_subset1 <- createDataPartition(y=df_training$classe, p=0.25, list=FALSE)
+df_ss_train <- df_training[index_subset1,]
+```
+
+```{r}
+set.seed(345)
+# modFit <- train(df_ss_train$classe ~ ., method="rf", data=df_ss_train)
+# print(modFit, digits=3)
+```
+Run predictions against the validation subset of training data.
+```{r}
+# predicts <- predict(modFit, newdata=df_ss_valid)
+# print(confusionMatrix(predicts, df_ss_valid$classe), digits=4)
+```
+
+Check the random forest with pre-processing and cross validation
+```{r}
+set.seed(345)
+modFit <- train(df_ss_train$classe ~ ., method="rf", preProcess=c("center", "scale"), trControl=trainControl(method = "cv", number = 4), data=df_ss_train)
+print(modFit, digits=3)
+```
+Run predictions against the validation subset of training data.
+```{r}
+predicts <- predict(modFit, newdata=df_ss_valid)
+print(confusionMatrix(predicts, df_ss_valid$classe), digits=4)
+```
+This resulted in an accuracy of 0.99
+```{r}
+# Run against 20 testing set provided by Professor Leek.
+print(predict(modFit, newdata=df_testing))
+```
+
+The out of sample error is around 0.0171.
+
+Conclusion:
+------------------------------------
+We applied different models but chose RF with preprocessign and cross validation.
+
+Due to hang of my machine I am not able to complete the last comparison (even with a smaller training set) of RF algorithms.
+
